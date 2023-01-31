@@ -391,7 +391,6 @@ class JSTypedArray
   template <typename IsolateT>
   friend class Deserializer;
   friend class Factory;
-  friend class WebSnapshotDeserializer;
 
   DECL_PRIMITIVE_SETTER(length, size_t)
   // Reads the "length" field, doesn't assert the TypedArray is not RAB / GSAB
@@ -418,6 +417,9 @@ class JSDataView
   // Dispatched behavior.
   DECL_PRINTER(JSDataView)
   DECL_VERIFIER(JSDataView)
+
+  inline size_t GetByteLength() const;
+  inline bool IsOutOfBounds() const;
 
   // TODO(v8:9287): Re-enable when GCMole stops mixing 32/64 bit configs.
   // static_assert(IsAligned(kDataPointerOffset, kTaggedSize));

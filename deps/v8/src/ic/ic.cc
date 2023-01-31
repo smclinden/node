@@ -341,7 +341,7 @@ void IC::OnFeedbackChanged(Isolate* isolate, FeedbackVector vector,
   }
 #endif
 
-  isolate->tiering_manager()->NotifyICChanged();
+  isolate->tiering_manager()->NotifyICChanged(vector);
 }
 
 namespace {
@@ -597,7 +597,7 @@ static bool AddOneReceiverMapIfMissing(
 }
 
 bool IC::UpdateMegaDOMIC(const MaybeObjectHandle& handler, Handle<Name> name) {
-  if (!v8_flags.enable_mega_dom_ic) return false;
+  if (!v8_flags.mega_dom_ic) return false;
 
   // TODO(gsathya): Enable fuzzing once this feature is more stable.
   if (v8_flags.fuzzing) return false;
@@ -837,6 +837,10 @@ void LoadIC::UpdateCaches(LookupIterator* lookup) {
       }
     }
     handler = ComputeHandler(lookup);
+    auto holder = lookup->GetHolder<Object>();
+    CHECK(*holder == *(lookup->lookup_start_object()) ||
+          LoadHandler::CanHandleHolderNotLookupStart(*handler.object()) ||
+          holder->IsJSPrimitiveWrapper());
   }
   // Can't use {lookup->name()} because the LookupIterator might be in
   // "elements" mode for keys that are strings representing integers above
@@ -1153,7 +1157,7 @@ MaybeObjectHandle LoadIC::ComputeHandler(LookupIterator* lookup) {
       UNREACHABLE();
   }
 
-  return MaybeObjectHandle(Handle<Code>::null());
+  return MaybeObjectHandle(Handle<InstructionStream>::null());
 }
 
 bool KeyedLoadIC::CanChangeToAllowOutOfBounds(Handle<Map> receiver_map) {
@@ -1750,7 +1754,6 @@ MaybeHandle<Object> StoreIC::Store(Handle<Object> object, Handle<Name> name,
     LookupIterator it(
         isolate(), object, key,
         IsDefineNamedOwnIC() ? LookupIterator::OWN : LookupIterator::DEFAULT);
-    DCHECK_IMPLIES(IsDefineNamedOwnIC(), it.IsFound() && it.HolderIsReceiver());
     // TODO(v8:12548): refactor DefinedNamedOwnIC and SetNamedIC as subclasses
     // of StoreIC so their logic doesn't get mixed here.
     if (IsDefineNamedOwnIC()) {
@@ -2110,8 +2113,10 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
       Handle<JSProxy> holder = lookup->GetHolder<JSProxy>();
 
       // IsDefineNamedOwnIC() is true when we are defining public fields on a
-      // Proxy. In that case use the slow stub to invoke the define trap.
-      if (IsDefineNamedOwnIC()) {
+      // Proxy. IsDefineKeyedOwnIC() is true when we are defining computed
+      // fields in a Proxy. In these cases use the slow stub to invoke the
+      // define trap.
+      if (IsDefineNamedOwnIC() || IsDefineKeyedOwnIC()) {
         TRACE_HANDLER_STATS(isolate(), StoreIC_SlowStub);
         return MaybeObjectHandle(StoreHandler::StoreSlow(isolate()));
       }
@@ -2278,6 +2283,13 @@ Handle<Object> KeyedStoreIC::StoreElementHandler(
       IsStoreInArrayLiteralIC());
 
   if (receiver_map->IsJSProxyMap()) {
+    // DefineKeyedOwnIC, which is used to define computed fields in instances,
+    // should be handled by the slow stub.
+    if (IsDefineKeyedOwnIC()) {
+      TRACE_HANDLER_STATS(isolate(), KeyedStoreIC_SlowStub);
+      return StoreHandler::StoreSlow(isolate(), store_mode);
+    }
+
     return StoreHandler::StoreProxy(isolate());
   }
 

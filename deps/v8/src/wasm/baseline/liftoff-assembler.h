@@ -114,11 +114,10 @@ class LiftoffAssembler : public TurboAssembler {
   // Each slot in our stack frame currently has exactly 8 bytes.
   static constexpr int kStackSlotSize = 8;
 
-  static constexpr ValueKind kPointerKind =
+  static constexpr ValueKind kIntPtrKind =
       kSystemPointerSize == kInt32Size ? kI32 : kI64;
-  static constexpr ValueKind kTaggedKind =
-      kTaggedSize == kInt32Size ? kI32 : kI64;
-  static constexpr ValueKind kSmiKind = kTaggedKind;
+  // A tagged value known to be a Smi can be treated like a ptr-sized int.
+  static constexpr ValueKind kSmiKind = kTaggedSize == kInt32Size ? kI32 : kI64;
 
   using ValueKindSig = Signature<ValueKind>;
 
@@ -250,7 +249,7 @@ class LiftoffAssembler : public TurboAssembler {
 
     // TODO(jkummerow): Wrap all accesses to {stack_state} in accessors that
     // check {frozen}.
-    base::SmallVector<VarState, 8> stack_state;
+    base::SmallVector<VarState, 16> stack_state;
     LiftoffRegList used_registers;
     uint32_t register_use_count[kAfterMaxLiftoffRegCode] = {0};
     LiftoffRegList last_spilled_regs;
@@ -583,7 +582,7 @@ class LiftoffAssembler : public TurboAssembler {
   }
 
   void PushConstant(ValueKind kind, int32_t i32_const) {
-    DCHECK(kind == kI32 || kind == kI64);
+    V8_ASSUME(kind == kI32 || kind == kI64);
     cache_state_.stack_state.emplace_back(kind, i32_const,
                                           NextSpillOffset(kind));
   }
@@ -652,7 +651,7 @@ class LiftoffAssembler : public TurboAssembler {
   void PrepareForBranch(uint32_t arity, LiftoffRegList pinned);
 
   enum JumpDirection { kForwardJump, kBackwardJump };
-  void MergeFullStackWith(CacheState& target, const CacheState& source);
+  void MergeFullStackWith(CacheState& target);
   void MergeStackWith(CacheState& target, uint32_t arity, JumpDirection);
 
   void Spill(VarState* slot);
@@ -771,8 +770,7 @@ class LiftoffAssembler : public TurboAssembler {
   inline void LoadTaggedPointerFromInstance(Register dst, Register instance,
                                             int offset);
   inline void LoadExternalPointer(Register dst, Register instance, int offset,
-                                  ExternalPointerTag tag,
-                                  Register isolate_root);
+                                  ExternalPointerTag tag, Register scratch);
   inline void SpillInstance(Register instance);
   inline void ResetOSRTarget();
   inline void LoadTaggedPointer(Register dst, Register src_addr,
@@ -820,40 +818,47 @@ class LiftoffAssembler : public TurboAssembler {
                     bool is_store_mem = false, bool i64_offset = false);
   inline void AtomicLoad(LiftoffRegister dst, Register src_addr,
                          Register offset_reg, uintptr_t offset_imm,
-                         LoadType type, LiftoffRegList pinned);
+                         LoadType type, LiftoffRegList pinned, bool i64_offset);
   inline void AtomicStore(Register dst_addr, Register offset_reg,
                           uintptr_t offset_imm, LiftoffRegister src,
-                          StoreType type, LiftoffRegList pinned);
+                          StoreType type, LiftoffRegList pinned,
+                          bool i64_offset);
 
   inline void AtomicAdd(Register dst_addr, Register offset_reg,
                         uintptr_t offset_imm, LiftoffRegister value,
-                        LiftoffRegister result, StoreType type);
+                        LiftoffRegister result, StoreType type,
+                        bool i64_offset);
 
   inline void AtomicSub(Register dst_addr, Register offset_reg,
                         uintptr_t offset_imm, LiftoffRegister value,
-                        LiftoffRegister result, StoreType type);
+                        LiftoffRegister result, StoreType type,
+                        bool i64_offset);
 
   inline void AtomicAnd(Register dst_addr, Register offset_reg,
                         uintptr_t offset_imm, LiftoffRegister value,
-                        LiftoffRegister result, StoreType type);
+                        LiftoffRegister result, StoreType type,
+                        bool i64_offset);
 
   inline void AtomicOr(Register dst_addr, Register offset_reg,
                        uintptr_t offset_imm, LiftoffRegister value,
-                       LiftoffRegister result, StoreType type);
+                       LiftoffRegister result, StoreType type, bool i64_offset);
 
   inline void AtomicXor(Register dst_addr, Register offset_reg,
                         uintptr_t offset_imm, LiftoffRegister value,
-                        LiftoffRegister result, StoreType type);
+                        LiftoffRegister result, StoreType type,
+                        bool i64_offset);
 
   inline void AtomicExchange(Register dst_addr, Register offset_reg,
                              uintptr_t offset_imm, LiftoffRegister value,
-                             LiftoffRegister result, StoreType type);
+                             LiftoffRegister result, StoreType type,
+                             bool i64_offset);
 
   inline void AtomicCompareExchange(Register dst_addr, Register offset_reg,
                                     uintptr_t offset_imm,
                                     LiftoffRegister expected,
                                     LiftoffRegister new_value,
-                                    LiftoffRegister value, StoreType type);
+                                    LiftoffRegister value, StoreType type,
+                                    bool i64_offset);
 
   inline void AtomicFence();
 
@@ -1852,7 +1857,7 @@ class LiftoffStackSlots {
 };
 
 #if DEBUG
-bool CheckCompatibleStackSlotTypes(ValueKind a, ValueKind b);
+bool CompatibleStackSlotTypes(ValueKind a, ValueKind b);
 #endif
 
 }  // namespace wasm

@@ -25,8 +25,7 @@ namespace wasm {
 using VarState = LiftoffAssembler::VarState;
 using ValueKindSig = LiftoffAssembler::ValueKindSig;
 
-constexpr ValueKind LiftoffAssembler::kPointerKind;
-constexpr ValueKind LiftoffAssembler::kTaggedKind;
+constexpr ValueKind LiftoffAssembler::kIntPtrKind;
 constexpr ValueKind LiftoffAssembler::kSmiKind;
 
 namespace {
@@ -94,9 +93,9 @@ class StackTransferRecipe {
   }
 
   V8_INLINE void TransferStackSlot(const VarState& dst, const VarState& src) {
-    DCHECK(CheckCompatibleStackSlotTypes(dst.kind(), src.kind()));
+    DCHECK(CompatibleStackSlotTypes(dst.kind(), src.kind()));
     if (dst.is_reg()) {
-      LoadIntoRegister(dst.reg(), src, src.offset());
+      LoadIntoRegister(dst.reg(), src);
       return;
     }
     if (dst.is_const()) {
@@ -120,11 +119,10 @@ class StackTransferRecipe {
   }
 
   V8_INLINE void LoadIntoRegister(LiftoffRegister dst,
-                                  const LiftoffAssembler::VarState& src,
-                                  uint32_t src_offset) {
+                                  const LiftoffAssembler::VarState& src) {
     switch (src.loc()) {
       case VarState::kStack:
-        LoadStackSlot(dst, src_offset, src.kind());
+        LoadStackSlot(dst, src.offset(), src.kind());
         break;
       case VarState::kRegister:
         DCHECK_EQ(dst.reg_class(), src.reg_class());
@@ -138,14 +136,14 @@ class StackTransferRecipe {
 
   void LoadI64HalfIntoRegister(LiftoffRegister dst,
                                const LiftoffAssembler::VarState& src,
-                               int offset, RegPairHalf half) {
+                               RegPairHalf half) {
     // Use CHECK such that the remaining code is statically dead if
     // {kNeedI64RegPair} is false.
     CHECK(kNeedI64RegPair);
     DCHECK_EQ(kI64, src.kind());
     switch (src.loc()) {
       case VarState::kStack:
-        LoadI64HalfStackSlot(dst, offset, half);
+        LoadI64HalfStackSlot(dst, src.offset(), half);
         break;
       case VarState::kRegister: {
         LiftoffRegister src_half =
@@ -779,25 +777,26 @@ bool SlotInterference(const VarState& a, base::Vector<const VarState> v) {
 }  // namespace
 #endif
 
-void LiftoffAssembler::MergeFullStackWith(CacheState& target,
-                                          const CacheState& source) {
-  DCHECK_EQ(source.stack_height(), target.stack_height());
+void LiftoffAssembler::MergeFullStackWith(CacheState& target) {
+  DCHECK_EQ(cache_state_.stack_height(), target.stack_height());
   // TODO(clemensb): Reuse the same StackTransferRecipe object to save some
   // allocations.
   StackTransferRecipe transfers(this);
-  for (uint32_t i = 0, e = source.stack_height(); i < e; ++i) {
-    transfers.TransferStackSlot(target.stack_state[i], source.stack_state[i]);
-    DCHECK(!SlotInterference(target.stack_state[i],
-                             base::VectorOf(source.stack_state.data() + i + 1,
-                                            source.stack_height() - i - 1)));
+  for (uint32_t i = 0, e = cache_state_.stack_height(); i < e; ++i) {
+    transfers.TransferStackSlot(target.stack_state[i],
+                                cache_state_.stack_state[i]);
+    DCHECK(!SlotInterference(
+        target.stack_state[i],
+        base::VectorOf(cache_state_.stack_state.data() + i + 1,
+                       cache_state_.stack_height() - i - 1)));
   }
 
   // Full stack merging is only done for forward jumps, so we can just clear the
   // cache registers at the target in case of mismatch.
-  if (source.cached_instance != target.cached_instance) {
+  if (cache_state_.cached_instance != target.cached_instance) {
     target.ClearCachedInstanceRegister();
   }
-  if (source.cached_mem_start != target.cached_mem_start) {
+  if (cache_state_.cached_mem_start != target.cached_mem_start) {
     target.ClearCachedMemStartRegister();
   }
 }
@@ -860,7 +859,7 @@ void LiftoffAssembler::MergeStackWith(CacheState& target, uint32_t arity,
       // If the source has the content but in the wrong register, execute a
       // register move as part of the stack transfer.
       transfers.MoveRegister(LiftoffRegister{*dst_reg},
-                             LiftoffRegister{src_reg}, kPointerKind);
+                             LiftoffRegister{src_reg}, kIntPtrKind);
     } else {
       // Otherwise (the source state has no cached content), we reload later.
       *reload = true;
@@ -952,7 +951,7 @@ void LiftoffAssembler::ClearRegister(
     if (reg != *use) continue;
     if (replacement == no_reg) {
       replacement = GetUnusedRegister(kGpReg, pinned).gp();
-      Move(replacement, reg, kPointerKind);
+      Move(replacement, reg, kIntPtrKind);
     }
     // We cannot leave this loop early. There may be multiple uses of {reg}.
     *use = replacement;
@@ -978,7 +977,7 @@ void PrepareStackTransfers(const ValueKindSig* sig,
     const bool is_gp_pair = kNeedI64RegPair && kind == kI64;
     const int num_lowered_params = is_gp_pair ? 2 : 1;
     const VarState& slot = slots[param];
-    const uint32_t stack_offset = slot.offset();
+    DCHECK(CompatibleStackSlotTypes(slot.kind(), kind));
     // Process both halfs of a register pair separately, because they are passed
     // as separate parameters. One or both of them could end up on the stack.
     for (int lowered_idx = 0; lowered_idx < num_lowered_params; ++lowered_idx) {
@@ -995,15 +994,14 @@ void PrepareStackTransfers(const ValueKindSig* sig,
             LiftoffRegister::from_external_code(rc, kind, reg_code);
         param_regs->set(reg);
         if (is_gp_pair) {
-          stack_transfers->LoadI64HalfIntoRegister(reg, slot, stack_offset,
-                                                   half);
+          stack_transfers->LoadI64HalfIntoRegister(reg, slot, half);
         } else {
-          stack_transfers->LoadIntoRegister(reg, slot, stack_offset);
+          stack_transfers->LoadIntoRegister(reg, slot);
         }
       } else {
         DCHECK(loc.IsCallerFrameSlot());
         int param_offset = -loc.GetLocation() - 1;
-        stack_slots->Add(slot, stack_offset, half, param_offset);
+        stack_slots->Add(slot, slot.offset(), half, param_offset);
       }
     }
   }
@@ -1036,8 +1034,6 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
                                    Register* target,
                                    Register* target_instance) {
   uint32_t num_params = static_cast<uint32_t>(sig->parameter_count());
-  // Input 0 is the call target.
-  constexpr size_t kInputShift = 1;
 
   // Spill all cache slots which are not being used as parameters.
   cache_state_.ClearAllCacheRegisters();
@@ -1056,15 +1052,17 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
   LiftoffRegList param_regs;
 
   // Move the target instance (if supplied) into the correct instance register.
-  compiler::LinkageLocation instance_loc =
-      call_descriptor->GetInputLocation(kInputShift);
-  DCHECK(instance_loc.IsRegister() && !instance_loc.IsAnyRegister());
-  Register instance_reg = Register::from_code(instance_loc.AsRegister());
+  Register instance_reg = wasm::kGpParamRegisters[0];
+  // Check that the call descriptor agrees. Input 0 is the call target, 1 is the
+  // instance.
+  DCHECK_EQ(
+      instance_reg,
+      Register::from_code(call_descriptor->GetInputLocation(1).AsRegister()));
   param_regs.set(instance_reg);
   if (target_instance && *target_instance != instance_reg) {
     stack_transfers.MoveRegister(LiftoffRegister(instance_reg),
                                  LiftoffRegister(*target_instance),
-                                 kPointerKind);
+                                 kIntPtrKind);
   }
 
   int param_slots = static_cast<int>(call_descriptor->ParameterSlotCount());
@@ -1083,10 +1081,10 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
     if (!free_regs.is_empty()) {
       LiftoffRegister new_target = free_regs.GetFirstRegSet();
       stack_transfers.MoveRegister(new_target, LiftoffRegister(*target),
-                                   kPointerKind);
+                                   kIntPtrKind);
       *target = new_target.gp();
     } else {
-      stack_slots.Add(VarState(kPointerKind, LiftoffRegister(*target), 0),
+      stack_slots.Add(VarState(kIntPtrKind, LiftoffRegister(*target), 0),
                       param_slots);
       param_slots++;
       *target = no_reg;
@@ -1201,8 +1199,7 @@ void LiftoffAssembler::MoveToReturnLocations(
       DCHECK_EQ(kGpReg, reg_class_for(return_kind));
     }
     stack_transfers.LoadIntoRegister(return_reg,
-                                     cache_state_.stack_state.back(),
-                                     cache_state_.stack_state.back().offset());
+                                     cache_state_.stack_state.back());
     return;
   }
 
@@ -1259,10 +1256,9 @@ void LiftoffAssembler::MoveToReturnLocations(
             LiftoffRegister::from_external_code(rc, return_kind, reg_code);
         VarState& slot = slots[i];
         if (needs_gp_pair) {
-          stack_transfers.LoadI64HalfIntoRegister(reg, slot, slot.offset(),
-                                                  half);
+          stack_transfers.LoadI64HalfIntoRegister(reg, slot, half);
         } else {
-          stack_transfers.LoadIntoRegister(reg, slot, slot.offset());
+          stack_transfers.LoadIntoRegister(reg, slot);
         }
       }
     }
@@ -1426,20 +1422,11 @@ std::ostream& operator<<(std::ostream& os, VarState slot) {
 }
 
 #if DEBUG
-bool CheckCompatibleStackSlotTypes(ValueKind a, ValueKind b) {
-  if (is_object_reference(a)) {
-    // Since Liftoff doesn't do accurate type tracking (e.g. on loop back
-    // edges), we only care that pointer types stay amongst pointer types.
-    // It's fine if ref/ref null overwrite each other.
-    DCHECK(is_object_reference(b));
-  } else if (is_rtt(a)) {
-    // Same for rtt/rtt_with_depth.
-    DCHECK(is_rtt(b));
-  } else {
-    // All other types (primitive numbers, bottom/stmt) must be equal.
-    DCHECK_EQ(a, b);
-  }
-  return true;  // Dummy so this can be called via DCHECK.
+bool CompatibleStackSlotTypes(ValueKind a, ValueKind b) {
+  // Since Liftoff doesn't do accurate type tracking (e.g. on loop back edges,
+  // ref.as_non_null/br_on_cast results), we only care that pointer types stay
+  // amongst pointer types. It's fine if ref/ref null overwrite each other.
+  return a == b || (is_object_reference(a) && is_object_reference(b));
 }
 #endif
 

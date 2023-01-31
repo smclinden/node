@@ -841,6 +841,11 @@ TNode<Object> JSGraphAssembler::JSCallRuntime2(Runtime::FunctionId function_id,
   });
 }
 
+Node* JSGraphAssembler::Chained(const Operator* op, Node* input) {
+  return AddNode(
+      graph()->NewNode(common()->Chained(op), input, effect(), control()));
+}
+
 Node* GraphAssembler::TypeGuard(Type type, Node* value) {
   return AddNode(
       graph()->NewNode(common()->TypeGuard(type), value, effect(), control()));
@@ -856,8 +861,7 @@ Node* GraphAssembler::DebugBreak() {
       graph()->NewNode(machine()->DebugBreak(), effect(), control()));
 }
 
-Node* GraphAssembler::Unreachable(
-    GraphAssemblerLabel<0u>* block_updater_successor) {
+Node* GraphAssembler::Unreachable() {
   Node* result = UnreachableWithoutConnectToEnd();
   ConnectUnreachableToEnd();
   InitializeEffectControl(nullptr, nullptr);
